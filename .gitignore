@@ -1,0 +1,24 @@
+# Credentials
+.env
+.env.*
+!.env.example
+
+# Python environments
+.venv/
+.venv312/
+venv/
+__pycache__/
+*.pyc
+
+# Local databases
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+
+# Generated outputs
+nationwide_diagnostic/
+logs/
+*.log
+
+# macOS files
+.DS_Store
