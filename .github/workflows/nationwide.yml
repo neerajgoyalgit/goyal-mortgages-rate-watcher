@@ -1,0 +1,57 @@
+name: Nationwide mortgage rate monitor
+on:
+  workflow_dispatch:
+  schedule:
+    # 10 AM UK time: 09 UTC in summer, 10 UTC in winter.
+    - cron: '0 9,10 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: nationwide-monitor
+  cancel-in-progress: false
+jobs:
+  check-rates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check UK scheduled hour
+        id: ukhour
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python - <<'PYCODE'
+          import datetime, os
+          from zoneinfo import ZoneInfo
+          uk_hour = datetime.datetime.now(ZoneInfo('Europe/London')).hour
+          proceed = os.environ['EVENT_NAME'] == 'workflow_dispatch' or uk_hour == 10
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'proceed={str(proceed).lower()}\n')
+          print('UK hour:', uk_hour, 'run:', proceed)
+          PYCODE
+      - uses: actions/checkout@v4
+        if: steps.ukhour.outputs.proceed == 'true'
+      - uses: actions/setup-python@v5
+        if: steps.ukhour.outputs.proceed == 'true'
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install Python and Chromium
+        if: steps.ukhour.outputs.proceed == 'true'
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+      - name: Check Nationwide rates
+        if: steps.ukhour.outputs.proceed == 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python nationwide_scraper.py
+      - name: Upload diagnostics
+        if: always() && steps.ukhour.outputs.proceed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nationwide-diagnostics
+          path: nationwide_diagnostic/
+          retention-days: 7
+          if-no-files-found: ignore
