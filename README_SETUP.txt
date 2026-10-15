@@ -1,0 +1,1 @@
+Copy the 3 Python files, requirements.txt and .github/workflows/nationwide.yml into your existing repo. Add GitHub Actions secrets SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, NTFY_TOPIC. Do not commit .env or secrets. First run Actions > Nationwide mortgage rate monitor > Run workflow. Check logs before relying on schedule.

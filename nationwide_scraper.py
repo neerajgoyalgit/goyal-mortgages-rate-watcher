@@ -87,39 +87,64 @@ def export(results, failures, observed_at):
                                  p['monthly_payment_gbp'], URL])
 
 
+SCENARIO_KEY = 'purchase_400000_30y_repayment'
+
+
+def supabase_request(method, table, *, params=None, payload=None, headers=None):
+    import requests
+    base = os.environ.get('SUPABASE_URL', '').rstrip('/')
+    key = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
+    if not base.startswith('https://') or not key:
+        raise RuntimeError('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required')
+    response = requests.request(
+        method, f'{base}/rest/v1/{table}', params=params, json=payload,
+        headers={'apikey': key, 'Authorization': f'Bearer {key}',
+                 'Content-Type': 'application/json', **(headers or {})},
+        timeout=35)
+    response.raise_for_status()
+    return response.json() if response.content else []
+
+
 def compare_and_store(results, observed_at):
-    """Maintain a separate baseline per LTV/product; never alter old 80% table."""
-    changes = []
-    new_baselines = 0
-    with sqlite3.connect(DB) as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS monitored_ltv_rates (
-            lender TEXT NOT NULL, ltv INTEGER NOT NULL, product TEXT NOT NULL,
-            initial_rate_pct REAL NOT NULL, upfront_fee_option_gbp INTEGER,
-            aprc_pct REAL, observed_at TEXT NOT NULL,
-            PRIMARY KEY (lender, ltv, product))''')
-        for ltv, products in results.items():
-            for p in products:
-                name = p['product']
-                current_rate = p['initial_rate_pct']
-                current_fee = p['upfront_fee_option_gbp']
-                previous = conn.execute('''SELECT initial_rate_pct, upfront_fee_option_gbp
-                    FROM monitored_ltv_rates WHERE lender=? AND ltv=? AND product=?''',
-                    ('Nationwide', ltv, name)).fetchone()
-                if previous is None:
-                    new_baselines += 1
-                elif (abs(previous[0] - current_rate) > 0.00001 or previous[1] != current_fee):
+    """Use existing cloud baselines. Store new observations only when changed."""
+    from decimal import Decimal
+    existing = supabase_request('GET', 'mortgage_rates', params={
+        'select': 'lender,scenario_key,product_name,ltv_percent,rate_percent,product_fee_gbp',
+        'lender': 'eq.Nationwide', 'scenario_key': f'eq.{SCENARIO_KEY}'})
+    by_key = {(int(Decimal(str(r['ltv_percent']))), r['product_name']): r for r in existing}
+    changes, new_baselines, latest_rows, history_rows = [], 0, [], []
+    for ltv, products in results.items():
+        for p in products:
+            name = p['product']
+            rate = Decimal(str(p['initial_rate_pct']))
+            fee = None if p['upfront_fee_option_gbp'] is None else Decimal(str(p['upfront_fee_option_gbp']))
+            old = by_key.get((ltv, name))
+            if old is None:
+                new_baselines += 1
+            else:
+                old_rate = Decimal(str(old['rate_percent']))
+                old_fee = None if old['product_fee_gbp'] is None else Decimal(str(old['product_fee_gbp']))
+                if abs(old_rate - rate) > Decimal('0.00001') or old_fee != fee:
                     changes.append({'ltv': ltv, 'product': name,
-                                    'old_rate': previous[0], 'new_rate': current_rate,
-                                    'old_fee': previous[1], 'new_fee': current_fee})
-                conn.execute('''INSERT INTO monitored_ltv_rates
-                    (lender, ltv, product, initial_rate_pct, upfront_fee_option_gbp, aprc_pct, observed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(lender, ltv, product) DO UPDATE SET
-                    initial_rate_pct=excluded.initial_rate_pct,
-                    upfront_fee_option_gbp=excluded.upfront_fee_option_gbp,
-                    aprc_pct=excluded.aprc_pct, observed_at=excluded.observed_at''',
-                    ('Nationwide', ltv, name, current_rate, current_fee,
-                     p['aprc_pct'], observed_at))
+                                    'old_rate': float(old_rate), 'new_rate': float(rate),
+                                    'old_fee': None if old_fee is None else float(old_fee),
+                                    'new_fee': None if fee is None else float(fee)})
+            row = {'lender': 'Nationwide', 'scenario_key': SCENARIO_KEY,
+                   'product_name': name, 'ltv_percent': ltv,
+                   'rate_percent': float(rate),
+                   'product_fee_gbp': None if fee is None else float(fee),
+                   'observed_at': observed_at}
+            latest_rows.append(row)
+            if old is None or any(c['ltv'] == ltv and c['product'] == name for c in changes):
+                history_rows.append(row)
+    # Only write history for new baselines or genuine rate/fee changes.
+    if history_rows:
+        supabase_request('POST', 'mortgage_rate_history', payload=history_rows,
+                         headers={'Prefer': 'return=minimal'})
+    if latest_rows:
+        supabase_request('POST', 'mortgage_rates', payload=latest_rows,
+                         params={'on_conflict': 'lender,scenario_key,product_name,ltv_percent'},
+                         headers={'Prefer': 'resolution=merge-duplicates,return=minimal'})
     return changes, new_baselines
 
 
@@ -139,7 +164,7 @@ def notify(changes):
         line = (f"{change['ltv']}% LTV {change['product']}: "
                 f"{change['old_rate']:.2f}% -> {change['new_rate']:.2f}%")
         if change['old_fee'] != change['new_fee']:
-            line += f" | fee £{change['old_fee']} -> £{change['new_fee']}"
+            line += f" | fee £{change['old_fee'] if change['old_fee'] is not None else 'N/A'} -> £{change['new_fee'] if change['new_fee'] is not None else 'N/A'}"
         lines.append(line)
     lines.append(URL)
     response = requests.post(url, data='\n'.join(lines).encode('utf-8'),
@@ -177,7 +202,7 @@ def main():
     for change in changes:
         print(f"CHANGED: {change['ltv']}% {change['product']}: "
               f"{change['old_rate']:.2f}% -> {change['new_rate']:.2f}%"
-              + (f" | fee £{change['old_fee']} -> £{change['new_fee']}"
+              + (f" | fee £{change['old_fee'] if change['old_fee'] is not None else 'N/A'} -> £{change['new_fee'] if change['new_fee'] is not None else 'N/A'}"
                  if change['old_fee'] != change['new_fee'] else ''))
     notify(changes)
     print('Exports:', OUT / 'nationwide_rates_multi_ltv.csv')

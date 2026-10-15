@@ -74,6 +74,7 @@ def scrape_one(browser, ltv, headed):
             product['scenario'] = {**product['scenario'], 'ltv': ltv, 'deposit': deposit}
         return products
     except Exception:
+        OUT.mkdir(parents=True, exist_ok=True)
         (OUT / f'error_{ltv}ltv.html').write_text(page.content(), encoding='utf-8')
         page.screenshot(path=str(OUT / f'error_{ltv}ltv.png'), full_page=True)
         raise
