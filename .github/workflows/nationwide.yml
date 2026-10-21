@@ -12,7 +12,7 @@ concurrency:
 jobs:
   check-rates:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 65
     steps:
       - name: Check UK scheduled hour
         id: ukhour
@@ -47,6 +47,10 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python nationwide_scraper.py
+      - name: Check Nationwide remortgage rates
+        if: steps.ukhour.outputs.proceed == 'true'
+        continue-on-error: true
+        run: python nationwide_remortgage_multi_ltv.py
       - name: Upload diagnostics
         if: always() && steps.ukhour.outputs.proceed == 'true'
         uses: actions/upload-artifact@v4
