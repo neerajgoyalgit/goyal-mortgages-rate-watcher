@@ -6,7 +6,7 @@ Run: python nationwide_remortgage_multi_ltv.py
 Optional: --headed, --retries 2, --delay 3
 Default run remains read-only. --check-supabase compares; --sync-supabase updates
 only existing matching remortgage rates after complete seven-band scrape.
-Never changes purchase rows or sends notifications.
+Never changes purchase rows. Sends ntfy alerts only after successful rate updates.
 """
 import argparse
 import csv
@@ -96,6 +96,35 @@ def supabase_request(method, params=None, data=None):
     return json.loads(body) if body else []
 
 
+def notify_rate_changes(changes):
+    """Send one ntfy notification after all changed rates are persisted."""
+    if not changes:
+        return
+    topic = os.environ.get('NTFY_TOPIC', '').strip()
+    if not topic:
+        raise RuntimeError('Rates updated but NTFY_TOPIC is missing; alert not sent')
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', topic):
+        raise RuntimeError('Rates updated but NTFY_TOPIC has invalid characters')
+    lines = [f'Nationwide remortgage: {len(changes)} rate change(s)']
+    for (name, ltv), row, new_rate in sorted(changes, key=lambda c: (c[0][1], c[0][0])):
+        old_rate = Decimal(str(row['rate_percent']))
+        difference = new_rate - old_rate
+        arrow = 'UP' if difference > 0 else 'DOWN'
+        lines.append(f'{ltv}% LTV | {name}: {old_rate:.2f}% -> {new_rate:.2f}% '
+                     f'({arrow} {abs(difference):.2f} percentage points)')
+    request = urllib.request.Request(
+        'https://ntfy.sh/' + topic,
+        data='\n'.join(lines).encode('utf-8'),
+        headers={'Title': 'Goyal Mortgages - Nationwide remortgage rate changes',
+                 'Tags': 'chart_with_upwards_trend',
+                 'Content-Type': 'text/plain; charset=utf-8'},
+        method='POST')
+    with urllib.request.urlopen(request, timeout=20) as response:
+        if response.status not in (200, 201, 202):
+            raise RuntimeError(f'Notification failed: HTTP {response.status}')
+    print(f'ntfy: sent one notification for {len(changes)} rate changes.')
+
+
 def compare_and_maybe_sync(results, observed_at, sync=False):
     # Never interpret a missing band/product as a product withdrawal.
     if set(results) != set(LTVS):
@@ -142,6 +171,10 @@ def compare_and_maybe_sync(results, observed_at, sync=False):
         if len(updated) != 1:
             raise RuntimeError(f'Expected exactly one updated row for {identity}')
     print(f'Supabase: updated {len(changes)} existing remortgage rates; no inserts/deletes.')
+    if changes:
+        notify_rate_changes(changes)
+    else:
+        print('ntfy: no rate changes; no notification sent.')
 
 
 def main():
@@ -150,7 +183,7 @@ def main():
     parser.add_argument('--retries', type=int, default=2)
     parser.add_argument('--delay', type=float, default=3)
     group = parser.add_mutually_exclusive_group()
-    group.add_argument('--check-supabase', action='store_true', help='Compare without writing')
+    group.add_argument('--check-supabase', '--check', action='store_true', help='Compare without writing')
     group.add_argument('--sync-supabase', action='store_true', help='Update existing matching rates')
     args = parser.parse_args()
     if args.retries < 0 or args.delay < 0:
