@@ -50,7 +50,7 @@ jobs:
       - name: Check Nationwide remortgage rates
         if: steps.ukhour.outputs.proceed == 'true'
         continue-on-error: true
-        run: python nationwide_remortgage_multi_ltv.py
+        run: python nationwide_remortgage_multi_ltv.py --check
       - name: Upload diagnostics
         if: always() && steps.ukhour.outputs.proceed == 'true'
         uses: actions/upload-artifact@v4
