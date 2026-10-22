@@ -49,7 +49,9 @@ jobs:
         run: python nationwide_scraper.py
       - name: Check Nationwide remortgage rates
         if: steps.ukhour.outputs.proceed == 'true'
-        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: python nationwide_remortgage_multi_ltv.py --check
       - name: Upload diagnostics
         if: always() && steps.ukhour.outputs.proceed == 'true'
