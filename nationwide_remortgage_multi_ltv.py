@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
-"""Read-only Nationwide remortgage discovery across seven sampled LTV bands.
+"""Nationwide remortgage discovery with opt-in Supabase comparison and updates.
 
 Requires discover_ltv_bands.py and nationwide_legacy_parser.py in same folder.
 Run: python nationwide_remortgage_multi_ltv.py
 Optional: --headed, --retries 2, --delay 3
-Never writes to Supabase/SQLite or sends notifications.
+Default run remains read-only. --check-supabase compares; --sync-supabase updates
+only existing matching remortgage rates after complete seven-band scrape.
+Never changes purchase rows or sends notifications.
 """
 import argparse
 import csv
 import json
+import os
+import urllib.parse
+import urllib.request
+from decimal import Decimal
 import re
 import time
 from datetime import datetime, timezone
@@ -67,11 +73,85 @@ def capture(browser, ltv):
         context.close()
 
 
+
+SCENARIO_KEY = 'remortgage_400000_30y_repayment'
+
+def supabase_request(method, params=None, data=None):
+    url = os.environ.get('SUPABASE_URL', '').rstrip('/')
+    key = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
+    if not url.startswith('https://') or not key:
+        raise RuntimeError('SUPABASE_URL (https) and SUPABASE_SERVICE_ROLE_KEY are required')
+    endpoint = url + '/rest/v1/mortgage_rates'
+    if params:
+        endpoint += '?' + urllib.parse.urlencode(params)
+    headers = {'apikey': key, 'Authorization': 'Bearer ' + key,
+               'Accept': 'application/json'}
+    if data is not None:
+        headers['Content-Type'] = 'application/json'
+        headers['Prefer'] = 'return=representation'
+    request = urllib.request.Request(endpoint, method=method, headers=headers,
+        data=json.dumps(data).encode('utf-8') if data is not None else None)
+    with urllib.request.urlopen(request, timeout=30) as response:
+        body = response.read()
+    return json.loads(body) if body else []
+
+
+def compare_and_maybe_sync(results, observed_at, sync=False):
+    # Never interpret a missing band/product as a product withdrawal.
+    if set(results) != set(LTVS):
+        raise RuntimeError('Supabase operation blocked: incomplete LTV coverage')
+    desired = {}
+    for ltv, products in results.items():
+        if not products:
+            raise RuntimeError(f'Supabase operation blocked: empty {ltv}% band')
+        for product in products:
+            name = product['product'].strip()
+            rate = Decimal(str(product['initial_rate_pct']))
+            if not name or not Decimal('0') < rate < Decimal('30'):
+                raise RuntimeError('Invalid product name or rate; no updates made')
+            identity = (name, ltv)
+            if identity in desired:
+                raise RuntimeError(f'Duplicate scraped product: {identity}')
+            desired[identity] = rate
+    existing = supabase_request('GET', {
+        'select': 'id,lender,scenario_key,product_name,ltv_percent,rate_percent',
+        'lender': 'eq.Nationwide', 'scenario_key': 'eq.' + SCENARIO_KEY,
+        'limit': '1000'})
+    stored = {(r['product_name'], int(Decimal(str(r['ltv_percent'])))): r
+              for r in existing}
+    if len(stored) != len(existing) or set(stored) != set(desired):
+        missing = sorted(set(desired) - set(stored))
+        extra = sorted(set(stored) - set(desired))
+        raise RuntimeError('Product roster differs from Supabase; review before updating. '
+                           f'New: {missing}; missing from scrape: {extra}')
+    changes = [(identity, stored[identity], rate) for identity, rate in desired.items()
+               if Decimal(str(stored[identity]['rate_percent'])) != rate]
+    print(f'Supabase comparison: {len(existing)} matching products; '
+          f'{len(changes)} rate changes. Fee fields left untouched.')
+    for (name, ltv), row, rate in changes:
+        print(f'  {ltv}% {name}: {row["rate_percent"]}% -> {rate}%')
+    if not sync:
+        print('Comparison only. No Supabase writes.')
+        return
+    # Update only pre-existing rows; never insert or delete records.
+    for identity, row, rate in changes:
+        updated = supabase_request('PATCH', {'id': 'eq.' + str(row['id']),
+             'scenario_key': 'eq.' + SCENARIO_KEY, 'lender': 'eq.Nationwide'},
+             {'rate_percent': float(rate), 'observed_at': observed_at,
+              'product_status': 'unverified'})
+        if len(updated) != 1:
+            raise RuntimeError(f'Expected exactly one updated row for {identity}')
+    print(f'Supabase: updated {len(changes)} existing remortgage rates; no inserts/deletes.')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--headed', action='store_true', help='Show browser window')
     parser.add_argument('--retries', type=int, default=2)
     parser.add_argument('--delay', type=float, default=3)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--check-supabase', action='store_true', help='Compare without writing')
+    group.add_argument('--sync-supabase', action='store_true', help='Update existing matching rates')
     args = parser.parse_args()
     if args.retries < 0 or args.delay < 0:
         parser.error('retries and delay must be nonnegative')
@@ -134,7 +214,12 @@ def main():
         print('Failures are NOT evidence that products have been withdrawn.')
     print('Saved:', csv_path)
     print('Saved:', json_path)
-    print('Read-only test complete. No database changes or alerts.')
+    if args.check_supabase or args.sync_supabase:
+        if failures:
+            raise RuntimeError('Supabase operation blocked due to failed LTV bands')
+        compare_and_maybe_sync(results, observed_at, sync=args.sync_supabase)
+    else:
+        print('Read-only test complete. No database changes or alerts.')
     if failures:
         raise SystemExit(2)
 
