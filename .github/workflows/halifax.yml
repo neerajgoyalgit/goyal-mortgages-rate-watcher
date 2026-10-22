@@ -1,0 +1,51 @@
+name: Halifax remortgage snapshot
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: halifax-remortgage-snapshot
+  cancel-in-progress: false
+
+jobs:
+  save-snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies and Chromium
+        run: |
+          python -m pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Scrape Halifax remortgage products
+        run: python halifax_remortgage_scraper.py
+
+      - name: Validate Halifax snapshot (no write)
+        run: python halifax_snapshot_sync.py
+
+      - name: Save Halifax snapshot to Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python halifax_snapshot_sync.py --commit
+
+      - name: Upload Halifax diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: halifax-remortgage-diagnostics
+          path: halifax_diagnostic/
+          retention-days: 7
+          if-no-files-found: ignore
