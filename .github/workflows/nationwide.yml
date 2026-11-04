@@ -3,7 +3,8 @@ on:
   workflow_dispatch:
   schedule:
     # 10 AM UK time: 09 UTC in summer, 10 UTC in winter.
-    - cron: '0 9,10 * * *'
+    - cron: '0 9 * * *'
+    - cron: '0 10 * * *'
 permissions:
   contents: read
 concurrency:
@@ -14,19 +15,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 65
     steps:
-      - name: Check UK scheduled hour
+      - name: Check UK scheduled slot
         id: ukhour
         env:
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
         run: |
           python - <<'PYCODE'
           import datetime, os
           from zoneinfo import ZoneInfo
-          uk_hour = datetime.datetime.now(ZoneInfo('Europe/London')).hour
-          proceed = os.environ['EVENT_NAME'] == 'workflow_dispatch' or uk_hour == 10
+          now = datetime.datetime.now(ZoneInfo('Europe/London'))
+          # Choose the scheduled UTC slot by UK daylight-saving offset,
+          # not the actual start hour (GitHub schedules may be delayed).
+          expected_cron = '0 9 * * *' if now.utcoffset().total_seconds() == 3600 else '0 10 * * *'
+          proceed = os.environ['EVENT_NAME'] == 'workflow_dispatch' or os.environ.get('EVENT_SCHEDULE') == expected_cron
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f'proceed={str(proceed).lower()}\n')
-          print('UK hour:', uk_hour, 'run:', proceed)
+          print('UK time:', now.isoformat(), 'trigger:', os.environ.get('EVENT_SCHEDULE'), 'expected:', expected_cron, 'run:', proceed)
           PYCODE
       - uses: actions/checkout@v4
         if: steps.ukhour.outputs.proceed == 'true'
