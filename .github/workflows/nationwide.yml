@@ -46,6 +46,7 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
       - name: Check Nationwide rates
+        id: purchase
         if: steps.ukhour.outputs.proceed == 'true'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -53,6 +54,7 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python nationwide_scraper.py
       - name: Check Nationwide remortgage rates
+        id: remortgage
         if: steps.ukhour.outputs.proceed == 'true'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -67,3 +69,15 @@ jobs:
           path: nationwide_diagnostic/
           retention-days: 7
           if-no-files-found: ignore
+      - name: Send daily admin monitoring notification
+        if: always() && steps.ukhour.outputs.proceed == 'true'
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          PURCHASE_RESULT: ${{ steps.purchase.outcome }}
+          REMORTGAGE_RESULT: ${{ steps.remortgage.outcome }}
+        run: |
+          if [ "$PURCHASE_RESULT" = "success" ] && [ "$REMORTGAGE_RESULT" = "success" ]; then
+            python daily_monitor_notification.py success
+          else
+            python daily_monitor_notification.py failure
+          fi
