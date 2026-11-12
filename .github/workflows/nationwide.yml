@@ -1,82 +1,85 @@
 name: Nationwide mortgage rate monitor
+
 on:
   workflow_dispatch:
   schedule:
-    # 10 AM UK time: 09 UTC in summer, 10 UTC in winter.
-    - cron: '0 9 * * *'
-    - cron: '0 10 * * *'
+    # Daily at 10:17 AM UK time, including daylight saving.
+    - cron: '17 10 * * *'
+      timezone: 'Europe/London'
+
 permissions:
   contents: read
+
 concurrency:
   group: nationwide-monitor
   cancel-in-progress: false
+
 jobs:
   check-rates:
     runs-on: ubuntu-latest
     timeout-minutes: 65
+
     steps:
-      - name: Check UK scheduled slot
-        id: ukhour
+      - name: Log workflow trigger
         env:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_SCHEDULE: ${{ github.event.schedule }}
         run: |
-          python - <<'PYCODE'
-          import datetime, os
-          from zoneinfo import ZoneInfo
-          now = datetime.datetime.now(ZoneInfo('Europe/London'))
-          # Choose the scheduled UTC slot by UK daylight-saving offset,
-          # not the actual start hour (GitHub schedules may be delayed).
-          expected_cron = '0 9 * * *' if now.utcoffset().total_seconds() == 3600 else '0 10 * * *'
-          proceed = os.environ['EVENT_NAME'] == 'workflow_dispatch' or os.environ.get('EVENT_SCHEDULE') == expected_cron
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f'proceed={str(proceed).lower()}\n')
-          print('UK time:', now.isoformat(), 'trigger:', os.environ.get('EVENT_SCHEDULE'), 'expected:', expected_cron, 'run:', proceed)
-          PYCODE
-      - uses: actions/checkout@v4
-        if: steps.ukhour.outputs.proceed == 'true'
-      - uses: actions/setup-python@v5
-        if: steps.ukhour.outputs.proceed == 'true'
+          echo "Event: $EVENT_NAME"
+          echo "Schedule: $EVENT_SCHEDULE"
+          TZ=Europe/London date
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
+
       - name: Install Python and Chromium
-        if: steps.ukhour.outputs.proceed == 'true'
         run: |
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
+
       - name: Check Nationwide rates
         id: purchase
-        if: steps.ukhour.outputs.proceed == 'true'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python nationwide_scraper.py
+
       - name: Check Nationwide remortgage rates
         id: remortgage
-        if: steps.ukhour.outputs.proceed == 'true'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python nationwide_remortgage_multi_ltv_updated.py --sync-supabase
+
       - name: Upload diagnostics
-        if: always() && steps.ukhour.outputs.proceed == 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: nationwide-diagnostics
           path: nationwide_diagnostic/
           retention-days: 7
           if-no-files-found: ignore
+
       - name: Send daily admin monitoring notification
-        if: always() && steps.ukhour.outputs.proceed == 'true'
+        if: always()
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           PURCHASE_RESULT: ${{ steps.purchase.outcome }}
           REMORTGAGE_RESULT: ${{ steps.remortgage.outcome }}
         run: |
-          if [ "$PURCHASE_RESULT" = "success" ] && [ "$REMORTGAGE_RESULT" = "success" ]; then
+          echo "Purchase result: $PURCHASE_RESULT"
+          echo "Remortgage result: $REMORTGAGE_RESULT"
+
+          if [ "$PURCHASE_RESULT" = "success" ] && \
+             [ "$REMORTGAGE_RESULT" = "success" ]; then
             python daily_monitor_notification.py success
           else
             python daily_monitor_notification.py failure
